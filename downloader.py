@@ -7,7 +7,7 @@ Handles downloading of high-quality manga images with progress tracking and retr
 import requests
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -235,3 +235,193 @@ class HighResDownloader:
             }
         except requests.RequestException as e:
             return {'error': str(e)}
+    
+    def verify_chapter_language(self, chapter_id: str) -> bool:
+        """
+        Verify that chapter is translated to pt-br.
+        
+        Args:
+            chapter_id: Chapter UUID
+            
+        Returns:
+            True if chapter is pt-br, False otherwise
+        """
+        try:
+            url = f"https://api.mangadex.org/chapter/{chapter_id}"
+            response = self.session.get(url)
+            response.raise_for_status()
+            
+            data = response.json()
+            attributes = data.get('data', {}).get('attributes', {})
+            translated_lang = attributes.get('translatedLanguage')
+            
+            return translated_lang == 'pt-br'
+            
+        except Exception as e:
+            print(f"Error verifying chapter language: {e}")
+            return False
+    
+    def get_best_chapter_group(self, chapter_feed: List[Dict]) -> Optional[Dict]:
+        """
+        Select the best chapter group from multiple groups providing same translation.
+        
+        Args:
+            chapter_feed: List of chapter dictionaries from manga feed
+            
+        Returns:
+            Best chapter dictionary or None
+        """
+        if not chapter_feed:
+            return None
+        
+        # Filter only pt-br chapters
+        pt_br_chapters = [
+            ch for ch in chapter_feed 
+            if ch.get('attributes', {}).get('translatedLanguage') == 'pt-br'
+        ]
+        
+        if not pt_br_chapters:
+            return None
+        
+        # Sort by version (highest first), then by creation date (newest first)
+        def sort_key(chapter):
+            attrs = chapter.get('attributes', {})
+            version = attrs.get('version', 0)
+            created_at = attrs.get('createdAt', '')
+            return (-version, created_at)
+        
+        pt_br_chapters.sort(key=sort_key)
+        
+        return pt_br_chapters[0]  # Return the best one
+    
+    def print_folder_structure_summary(self, manga_title: str, chapter_queue: List[str], manga_base_dir: Path):
+        """
+        Print a summary of the folder structure before starting download.
+        
+        Args:
+            manga_title: Title of the manga
+            chapter_queue: List of chapter IDs to download
+            manga_base_dir: Base directory for downloads
+        """
+        print(f"\n=== Folder Structure Summary ===")
+        print(f"Manga: {manga_title}")
+        print(f"Base Directory: {manga_base_dir}")
+        print(f"Total Chapters: {len(chapter_queue)}")
+        print(f"Language: pt-br (Portuguese Brazilian)")
+        print(f"Image Quality: High (original size)")
+        print(f"Concurrent Downloads: {self.max_workers} workers")
+        
+        # Try to show sample folder structure
+        try:
+            if len(chapter_queue) > 0:
+                # Get info for first few chapters to show structure pattern
+                sample_chapters = chapter_queue[:3] if len(chapter_queue) >= 3 else chapter_queue
+                
+                print(f"\nSample Folder Structure:")
+                for i, chapter_id in enumerate(sample_chapters):
+                    try:
+                        url = f"https://api.mangadex.org/chapter/{chapter_id}"
+                        response = self.session.get(url)
+                        if response.status_code == 200:
+                            data = response.json()
+                            attrs = data.get('data', {}).get('attributes', {})
+                            volume = attrs.get('volume')
+                            chapter = attrs.get('chapter')
+                            
+                            if volume and volume.strip():
+                                volume_num = int(float(volume))
+                                if chapter and chapter.strip():
+                                    try:
+                                        ch_num = float(chapter)
+                                        if ch_num.is_integer():
+                                            print(f"  Volume_{volume_num:02d}/Chapter_{int(ch_num):03d}/")
+                                        else:
+                                            int_part = int(ch_num)
+                                            decimal_part = str(ch_num).split('.')[1] if '.' in str(ch_num) else '0'
+                                            print(f"  Volume_{volume_num:02d}/Chapter_{int_part:03d}.{decimal_part}/")
+                                    except:
+                                        print(f"  Volume_{volume_num:02d}/Chapter_{chapter}/")
+                                else:
+                                    print(f"  Volume_{volume_num:02d}/Chapter_{chapter_id[:8]}/")
+                            else:
+                                if chapter and chapter.strip():
+                                    try:
+                                        ch_num = float(chapter)
+                                        base_chapter_num = int(ch_num)  # Get base number for grouping
+                                        
+                                        # Calculate chapter group using base number
+                                        group_start = ((base_chapter_num - 1) // 10) * 10 + 1
+                                        group_end = group_start + 9
+                                        
+                                        if ch_num.is_integer():
+                                            print(f"  Chapters_{group_start:03d}-{group_end:03d}/Chapter_{int(ch_num):03d}/")
+                                        else:
+                                            int_part = int(ch_num)
+                                            decimal_part = str(ch_num).split('.')[1] if '.' in str(ch_num) else '0'
+                                            print(f"  Chapters_{group_start:03d}-{group_end:03d}/Chapter_{int_part:03d}.{decimal_part}/")
+                                    except:
+                                        print(f"  Chapters_Unknown/Chapter_{chapter}/")
+                                else:
+                                    print(f"  Chapters_Unknown/Chapter_{chapter_id[:8]}/")
+                    except:
+                        print(f"  Chapter_{chapter_id[:8]}/")
+                
+                if len(chapter_queue) > 3:
+                    print(f"  ... and {len(chapter_queue) - 3} more chapters")
+        
+        except Exception as e:
+            print(f"Could not generate folder structure preview: {e}")
+        
+        print("=" * 40)
+    
+    def download_chapter_with_verification(self, chapter_id: str, base_dir: Path) -> bool:
+        """
+        Download chapter with language verification and high-quality assets.
+        
+        Args:
+            chapter_id: Chapter UUID
+            base_dir: Directory to save images
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Verify language first
+        if not self.verify_chapter_language(chapter_id):
+            print(f"Skipping chapter {chapter_id}: Not pt-br language")
+            return False
+        
+        # Get high-quality assets
+        try:
+            manga_url = f"https://api.mangadex.org/at-home/server/{chapter_id}"
+            response = self.session.get(manga_url)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if 'baseUrl' not in data or 'chapter' not in data:
+                print(f"Invalid response format for chapter {chapter_id}")
+                return False
+            
+            chapter_info = data['chapter']
+            if 'hash' not in chapter_info or 'data' not in chapter_info:
+                print(f"Invalid chapter data format for chapter {chapter_id}")
+                return False
+            
+            base_url = data['baseUrl']
+            chapter_hash = chapter_info['hash']
+            filenames = chapter_info['data']  # Use high-quality data array
+            
+            # Build full image URLs
+            image_urls = []
+            for filename in filenames:
+                full_url = f"{base_url}/data/{chapter_hash}/{filename}"
+                image_urls.append(full_url)
+            
+            # Download images concurrently
+            results = self.download_images_concurrent(image_urls, base_dir)
+            
+            return len(results['successful']) > 0
+            
+        except Exception as e:
+            print(f"Error downloading chapter {chapter_id}: {e}")
+            return False

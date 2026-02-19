@@ -58,6 +58,50 @@ class MangaDexDownloader:
         except requests.RequestException as e:
             raise requests.RequestException(f"Failed to fetch chapter data: {e}")
     
+    def get_chapter_assets(self, chapter_id: str) -> Tuple[str, List[str]]:
+        """
+        Get high-quality chapter assets from MangaDex API.
+        
+        Args:
+            chapter_id: The chapter UUID
+            
+        Returns:
+            Tuple of (base_url, list of full image URLs)
+            
+        Raises:
+            requests.RequestException: If API request fails
+            ValueError: If response format is invalid
+        """
+        url = f"{self.base_url}/at-home/server/{chapter_id}"
+        
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if 'baseUrl' not in data or 'chapter' not in data:
+                raise ValueError("Invalid response format from MangaDex API")
+            
+            chapter_info = data['chapter']
+            if 'hash' not in chapter_info or 'data' not in chapter_info:
+                raise ValueError("Invalid chapter data format")
+            
+            base_url = data['baseUrl']
+            chapter_hash = chapter_info['hash']
+            filenames = chapter_info['data']  # Use high-quality data array
+            
+            # Construct full image URLs
+            image_urls = []
+            for filename in filenames:
+                full_url = f"{base_url}/data/{chapter_hash}/{filename}"
+                image_urls.append(full_url)
+            
+            return base_url, image_urls
+            
+        except requests.RequestException as e:
+            raise requests.RequestException(f"Failed to fetch chapter assets: {e}")
+    
     def download_page(self, url: str, save_path: Path) -> bool:
         """
         Download a single page image.

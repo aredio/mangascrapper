@@ -113,3 +113,23 @@ class MangaExporter:
                 print(f"Error saving PDF: {e}")
         else:
             print("No valid images found for PDF export.")
+
+    def run_exports(self, source_folder, manga_name, group_name, make_cbz=True, make_pdf=True):
+        """
+        Unified method to run exports conditionally based on boolean flags.
+        
+        Args:
+            source_folder: Path to the folder containing images
+            manga_name: Name of the manga
+            group_name: Name of the volume/group
+            make_cbz: Whether to create CBZ export
+            make_pdf: Whether to create PDF export
+        """
+        if make_cbz:
+            self.export_to_cbz(source_folder, manga_name, group_name)
+        
+        if make_pdf:
+            self.export_to_pdf(source_folder, manga_name, group_name)
+        
+        if not make_cbz and not make_pdf:
+            print("No export formats selected.")

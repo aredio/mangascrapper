@@ -14,8 +14,89 @@ from pathlib import Path
 from tqdm import tqdm
 from md_client import MangaDexDownloader
 from downloader import HighResDownloader
-# from enhacer import MangaEnhancer  # Commented out due to dependency issues
+from enhacer import MangaEnhancer
 from exporter import MangaExporter
+
+
+def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
+    """
+    Orchestrate post-download processing for a finished volume.
+    
+    Args:
+        manga_name: Name of the manga
+        volume_name: Name of the volume/group
+        raw_folder_path: Path to the raw downloaded folder
+        config: Dictionary containing user choices ('do_upscale', 'export_cbz', 'export_pdf')
+    """
+    working_folder = raw_folder_path
+    upscaled_folder = None
+    
+    try:
+        # Step 1: Upscaling if requested
+        if config.get('do_upscale', False):
+            print(f"Starting AI upscaling for {volume_name}...")
+            
+            # Define upscaled folder path
+            upscaled_folder_path = Path(f"upscaled_temp/{manga_name}/{volume_name}")
+            upscaled_folder_path.mkdir(parents=True, exist_ok=True)
+            
+            # Run external waifu2x processor
+            try:
+                result = subprocess.run([
+                    'python', 'waifu2x_batch_processor.py',
+                    '-i', str(raw_folder_path),
+                    '-o', str(upscaled_folder_path),
+                    '-n', '2',
+                    '-s', '2'
+                ], check=True, capture_output=True, text=True)
+                
+                print(f"✓ AI upscaling completed for {volume_name}")
+                working_folder = upscaled_folder_path
+                
+            except subprocess.CalledProcessError as e:
+                print(f"✗ AI upscaling failed for {volume_name}: {e}")
+                print(f"Error output: {e.stderr}")
+                # Fall back to raw folder if upscaling fails
+                working_folder = raw_folder_path
+            except Exception as e:
+                print(f"✗ Unexpected error during upscaling: {e}")
+                working_folder = raw_folder_path
+        else:
+            working_folder = raw_folder_path
+            
+        # Step 2: Export if requested
+        if config.get('export_cbz', False) or config.get('export_pdf', False):
+            print(f"Starting export for {volume_name}...")
+            
+            exporter = MangaExporter()
+            exporter.run_exports(
+                source_folder=str(working_folder),
+                manga_name=manga_name,
+                group_name=volume_name,
+                make_cbz=config.get('export_cbz', False),
+                make_pdf=config.get('export_pdf', False)
+            )
+            print(f"✓ Export completed for {volume_name}")
+        
+        # Step 3: Cleanup if export was performed
+        if config.get('export_cbz', False) or config.get('export_pdf', False):
+            print(f"Cleaning up raw images in {raw_folder_path}...")
+            
+            # Delete raw folder
+            if os.path.exists(raw_folder_path):
+                shutil.rmtree(raw_folder_path)
+                print(f"✓ Removed raw folder: {raw_folder_path}")
+            
+            # Delete upscaled folder if it exists and was used
+            if config.get('do_upscale', False) and 'upscaled_folder_path' in locals() and os.path.exists(upscaled_folder_path):
+                shutil.rmtree(upscaled_folder_path)
+                print(f"✓ Removed upscaled folder: {upscaled_folder_path}")
+        
+        print(f"✓ Processing completed for {volume_name}")
+        
+    except Exception as e:
+        print(f"✗ Error processing {volume_name}: {e}")
+        # Don't delete folders on error to allow manual recovery
 
 
 class MangaDownloader:
@@ -291,8 +372,16 @@ class MangaDownloader:
             print(f"Error creating download queue: {e}")
             return []
     
-    def download_manga_queue(self, manga_id: str):
-        """Download all chapters from a manga feed queue and export per volume/group."""
+    def download_manga_queue(self, manga_id: str, config=None):
+        """Download all chapters from a manga feed queue and export per volume/group.
+        
+        Args:
+            manga_id: The manga ID to download
+            config: Configuration dictionary with 'do_upscale', 'export_cbz', 'export_pdf' keys
+        """
+        # Default configuration if not provided
+        if config is None:
+            config = {'do_upscale': False, 'export_cbz': False, 'export_pdf': False}
         # Get the download queue with best chapter selection
         chapter_queue = self.get_download_queue(manga_id)
         
@@ -362,27 +451,20 @@ class MangaDownloader:
                         should_export = True
                     
                     if should_export and group_name not in completed_groups:
-                        print(f"\n--- Exporting completed {group_name} ---")
+                        print(f"\n--- Processing completed {group_name} ---")
                         try:
-                            # Export to CBZ and PDF
-                            exporter.export_to_cbz(str(group_folder), manga_title, group_name)
-                            exporter.export_to_pdf(str(group_folder), manga_title, group_name)
+                            # Get manga title for this volume
+                            manga_title = self.get_manga_title(chapter_id)
+                            manga_title = ''.join(c for c in manga_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
                             
-                            # Clean up raw image folders to save space
-                            print(f"Cleaning up raw images in {group_folder}...")
-                            for chapter_subdir in group_folder.iterdir():
-                                if chapter_subdir.is_dir():
-                                    try:
-                                        shutil.rmtree(chapter_subdir)
-                                        print(f"  Removed: {chapter_subdir.name}")
-                                    except Exception as e:
-                                        print(f"  Failed to remove {chapter_subdir.name}: {e}")
+                            # Call the orchestrator function
+                            handle_finished_volume(manga_title, group_name, group_folder, config)
                             
                             completed_groups.add(group_name)
-                            print(f"✓ Exported {group_name}")
+                            print(f"✓ Processed {group_name}")
                             
                         except Exception as e:
-                            print(f"✗ Failed to export {group_name}: {e}")
+                            print(f"✗ Failed to process {group_name}: {e}")
                 else:
                     failed_downloads += 1
                     print(f"✗ Failed to download chapter {i+1}")
@@ -414,26 +496,21 @@ class MangaDownloader:
                 remaining_groups.append(group_folder)
         
         if remaining_groups:
-            print(f"\n=== Exporting Remaining Groups ===")
+            print(f"\n=== Processing Remaining Groups ===")
             for group_folder in remaining_groups:
                 group_name = group_folder.name
-                print(f"\n--- Exporting remaining {group_name} ---")
+                print(f"\n--- Processing remaining {group_name} ---")
                 try:
-                    exporter.export_to_cbz(str(group_folder), manga_title, group_name)
-                    exporter.export_to_pdf(str(group_folder), manga_title, group_name)
+                    # Get manga title
+                    manga_title = self.get_manga_title(chapter_queue[0])
+                    manga_title = ''.join(c for c in manga_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
                     
-                    # Clean up
-                    for chapter_subdir in group_folder.iterdir():
-                        if chapter_subdir.is_dir():
-                            try:
-                                shutil.rmtree(chapter_subdir)
-                                print(f"  Removed: {chapter_subdir.name}")
-                            except Exception as e:
-                                print(f"  Failed to remove {chapter_subdir.name}: {e}")
+                    # Call the orchestrator function
+                    handle_finished_volume(manga_title, group_name, group_folder, config)
                     
-                    print(f"✓ Exported {group_name}")
+                    print(f"✓ Processed {group_name}")
                 except Exception as e:
-                    print(f"✗ Failed to export {group_name}: {e}")
+                    print(f"✗ Failed to process {group_name}: {e}")
         
         print(f"\n=== Complete Workflow Finished ===")
         print(f"Downloaded, enhanced, and exported manga to CBZ and PDF formats")
@@ -567,73 +644,173 @@ def main_workflow():
         print("Please check your input and try again.")
 
 
+def display_main_menu():
+    """Display the main menu options"""
+    print("\n=== py-tana - your manga shelf extender ===")
+    print("1 - Baixar Imagens")
+    print("2 - Baixar e exportar (PDF/CBZ)")
+    print("3 - Baixar, aprimorar as imagens e exportar (PDF/CBZ)")
+    print("4 - Baixar da lista (yet to be developed)")
+    print("5 - Baixar de outras fontes (non-mangadex) (yet to be developed)")
+
+def display_export_submenu():
+    """Display the export format submenu"""
+    print("\n=== Escolher formato de exportação ===")
+    print("A - Somente CBZ")
+    print("B - Somente PDF")
+    print("C - Ambos (CBZ e PDF)")
+
+def get_manga_input():
+    """Get manga input from user"""
+    print("\n=== Entrada MangaDex ===")
+    print("Enter a MangaDex URL or Chapter UUID to download")
+    print("Examples:")
+    print("  - https://mangadex.org/chapter/d9f90199-79fb-403f-a313-a054f1a77b0c")
+    print("  - https://mangadex.org/title/a9232d4b-9e89-49bb-bb7c-3a0c6e4b5c1a")
+    print("  - d9f90199-79fb-403f-a313-a054f1a77b0c")
+    print()
+    
+    user_input = input("Enter MangaDex URL or Chapter UUID: ").strip()
+    
+    if not user_input:
+        print("No input provided.")
+        return None
+    
+    return user_input
+
 def main():
-    """Main function to download manga chapters."""
+    """Main function with interactive CLI menu"""
     downloader = MangaDownloader()
     
-    print("=== MangaDex Chapter Downloader ===")
-    print("Choose workflow:")
-    print("1. Download only")
-    print("2. Download + Export (recommended)")
-    print("Note: Enhancement temporarily disabled due to dependency issues")
+    # Configuration variables
+    do_upscale = False
+    export_cbz = False
+    export_pdf = False
     
-    choice = input("Enter choice (1 or 2, default=2): ").strip()
+    while True:
+        display_main_menu()
+        choice = input("\nEscolha uma opção (1-5): ").strip().upper()
+        
+        if choice == "1":
+            # Download only
+            do_upscale = False
+            export_cbz = False
+            export_pdf = False
+            
+            user_input = get_manga_input()
+            if user_input:
+                execute_download_workflow(downloader, user_input, do_upscale, export_cbz, export_pdf)
+                
+        elif choice == "2":
+            # Download and export
+            do_upscale = False
+            export_cbz, export_pdf = get_export_format_choice()
+            
+            if export_cbz or export_pdf:
+                user_input = get_manga_input()
+                if user_input:
+                    execute_download_workflow(downloader, user_input, do_upscale, export_cbz, export_pdf)
+                    
+        elif choice == "3":
+            # Download, enhance and export
+            do_upscale = True
+            export_cbz, export_pdf = get_export_format_choice()
+            
+            if export_cbz or export_pdf:
+                user_input = get_manga_input()
+                if user_input:
+                    execute_download_workflow(downloader, user_input, do_upscale, export_cbz, export_pdf)
+                    
+        elif choice == "4":
+            print("\nOpção não implementada ainda.")
+            continue
+            
+        elif choice == "5":
+            print("\nOpção não implementada ainda.")
+            continue
+            
+        else:
+            print("\nOpção inválida. Tente novamente.")
+            continue
+            
+        # Ask if user wants to continue
+        continue_choice = input("\nDeseja continuar? (S/N): ").strip().upper()
+        if continue_choice != 'S':
+            break
     
-    if choice == "1":
-        # Original download workflow
-        print("\n=== Download Only Mode ===")
-        print("Enter a MangaDex URL or Chapter UUID to download")
-        print("Examples:")
-        print("  - https://mangadex.org/chapter/d9f90199-79fb-403f-a313-a054f1a77b0c")
-        print("  - https://mangadex.org/title/a9232d4b-9e89-49bb-bb7c-3a0c6e4b5c1a")
-        print("  - d9f90199-79fb-403f-a313-a054f1a77b0c")
-        print()
+    print("\nObrigado por usar py-tana!")
+
+def get_export_format_choice():
+    """Get export format choice from user"""
+    while True:
+        display_export_submenu()
+        format_choice = input("\nEscolha o formato (A-C): ").strip().upper()
         
-        # Get user input
-        user_input = input("Enter MangaDex URL or Chapter UUID: ").strip()
+        if format_choice == "A":
+            return True, False  # CBZ only
+        elif format_choice == "B":
+            return False, True  # PDF only
+        elif format_choice == "C":
+            return True, True   # Both
+        else:
+            print("Opção inválida. Tente novamente.")
+
+def execute_download_workflow(downloader, user_input, do_upscale, export_cbz, export_pdf):
+    """Execute the download workflow with given configuration"""
+    try:
+        # Extract manga ID from user input
+        manga_id = downloader.get_manga_id_from_input(user_input)
         
-        if not user_input:
-            print("No input provided. Exiting.")
+        # Get manga title for display
+        try:
+            manga_url = f"https://api.mangadex.org/manga/{manga_id}"
+            response = downloader.api_client.session.get(manga_url)
+            if response.status_code == 200:
+                manga_data = response.json()
+                attributes = manga_data.get('data', {}).get('attributes', {})
+                title = attributes.get('title', {})
+                manga_title = title.get('en') or title.get('ja') or list(title.values())[0] if title else "Unknown Manga"
+                print(f"\nManga: {manga_title}")
+        except:
+            manga_title = "Unknown Manga"
+        
+        # Display configuration
+        print(f"\n=== Configuração ===")
+        print(f"Aprimorar imagens: {'Sim' if do_upscale else 'Não'}")
+        print(f"Exportar CBZ: {'Sim' if export_cbz else 'Não'}")
+        print(f"Exportar PDF: {'Sim' if export_pdf else 'Não'}")
+        
+        # Get download queue
+        download_queue = downloader.get_download_queue(manga_id)
+        
+        if not download_queue:
+            print("Nenhum capítulo encontrado para download.")
             return
         
-        try:
-            # Extract manga ID from user input
-            manga_id = downloader.get_manga_id_from_input(user_input)
-            
-            # Get manga title for display
-            try:
-                manga_url = f"https://api.mangadex.org/manga/{manga_id}"
-                response = downloader.api_client.session.get(manga_url)
-                if response.status_code == 200:
-                    manga_data = response.json()
-                    attributes = manga_data.get('data', {}).get('attributes', {})
-                    title = attributes.get('title', {})
-                    manga_title = title.get('en') or title.get('ja') or list(title.values())[0] if title else "Unknown Manga"
-                    print(f"\nManga: {manga_title}")
-            except:
-                manga_title = "Unknown Manga"
-            
-            # Get download queue
-            download_queue = downloader.get_download_queue(manga_id)
-            
-            if not download_queue:
-                print("No chapters found to download.")
-                return
-            
-            print(f"\nFound {len(download_queue)} chapters in pt-br")
-            print("Starting download...")
-            
-            # Start the download
-            downloader.download_manga_queue(manga_id)
-            
-        except KeyboardInterrupt:
-            print("\nDownload interrupted by user")
-        except Exception as e:
-            print(f"Error: {e}")
-            print("Please check your input and try again.")
-    else:
-        # Download + enhance workflow
-        main_workflow()
+        print(f"\nFound {len(download_queue)} chapters in pt-br")
+        
+        # Create configuration dictionary
+        config = {
+            'do_upscale': do_upscale,
+            'export_cbz': export_cbz,
+            'export_pdf': export_pdf
+        }
+        
+        # Pass configuration to download method
+        if do_upscale or export_cbz or export_pdf:
+            print("Starting download and export workflow...")
+            downloader.download_manga_queue(manga_id, config)
+        else:
+            print("Starting download workflow...")
+            downloader.download_manga_queue(manga_id, config)
+        
+        print(f"\n=== Workflow concluído ===")
+        
+    except KeyboardInterrupt:
+        print("\nWorkflow interrompido pelo usuário")
+    except Exception as e:
+        print(f"Erro: {e}")
+        print("Por favor, verifique sua entrada e tente novamente.")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ from pathlib import Path
 from tqdm import tqdm
 from md_client import MangaDexDownloader
 from downloader import HighResDownloader
-from enhacer import MangaEnhancer
 from exporter import MangaExporter
 
 

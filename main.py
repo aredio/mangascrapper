@@ -9,6 +9,7 @@ import uuid
 import time
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from tqdm import tqdm
 from md_client import MangaDexDownloader

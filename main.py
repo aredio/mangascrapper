@@ -8,10 +8,13 @@ import os
 import uuid
 import time
 import re
+import shutil
 from pathlib import Path
 from tqdm import tqdm
 from md_client import MangaDexDownloader
 from downloader import HighResDownloader
+# from enhacer import MangaEnhancer  # Commented out due to dependency issues
+from exporter import MangaExporter
 
 
 class MangaDownloader:
@@ -22,14 +25,14 @@ class MangaDownloader:
         self.image_downloader = HighResDownloader()
     
     def download_chapter_images_high_res(self, chapter_id: str, chapter_dir: Path) -> bool:
-        """Download high-quality images for a chapter using concurrent downloads."""
+        """Download high-quality images for a chapter."""
         try:
             print(f"Fetching high-quality image URLs for chapter {chapter_id}...")
             base_url, image_urls = self.api_client.get_chapter_assets(chapter_id)
             
             print(f"Downloading {len(image_urls)} high-quality images concurrently...")
             
-            # Use concurrent download method
+            # Download images concurrently
             results = self.image_downloader.download_images_concurrent(image_urls, chapter_dir)
             
             if results['successful']:
@@ -40,6 +43,12 @@ class MangaDownloader:
                     print(f"Failed to download {len(results['failed'])} images:")
                     for failure in results['failed']:
                         print(f"  - {failure.get('path', 'Unknown file')}")
+                
+                # Enhancement temporarily disabled due to dependency issues
+                # print("Starting enhancement for downloaded images...")
+                # enhancer = MangaEnhancer()
+                # enhancer.process_chapter(chapter_dir)
+                # print("✓ Chapter enhancement completed")
                 
                 return len(results['failed']) == 0  # Return True only if all succeeded
             else:
@@ -282,7 +291,7 @@ class MangaDownloader:
             return []
     
     def download_manga_queue(self, manga_id: str):
-        """Download all chapters from a manga feed queue."""
+        """Download all chapters from a manga feed queue and export per volume/group."""
         # Get the download queue with best chapter selection
         chapter_queue = self.get_download_queue(manga_id)
         
@@ -298,6 +307,11 @@ class MangaDownloader:
         # Print folder structure summary
         self.image_downloader.print_folder_structure_summary(manga_title, chapter_queue, manga_base_dir)
         
+        # Initialize exporter
+        exporter = MangaExporter()
+        
+        # Track completed volumes/groups for export
+        completed_groups = set()
         successful_downloads = 0
         failed_downloads = 0
         
@@ -315,6 +329,59 @@ class MangaDownloader:
                 if success:
                     successful_downloads += 1
                     print(f"✓ Successfully downloaded chapter {i+1}")
+                    
+                    # Check if the volume/group is now complete and export it
+                    group_folder = chapter_dir.parent  # This is the Volume_X or Chapters_XXX-YYY folder
+                    group_name = group_folder.name
+                    
+                    # Count chapters in this group
+                    chapters_in_group = len([d for d in group_folder.iterdir() if d.is_dir()])
+                    
+                    # Determine if this group should be exported
+                    should_export = False
+                    
+                    if group_name.startswith("Volume_"):
+                        # For volumes, we need to check if all chapters for this volume are downloaded
+                        # This is complex, so we'll export when we reach the last chapter in queue for this volume
+                        # or when we detect the volume is "complete" based on chapter count
+                        volume_chapters = [c for c in chapter_queue if self._get_volume_for_chapter(c) == group_name]
+                        downloaded_volume_chapters = len([d for d in group_folder.iterdir() if d.is_dir()])
+                        should_export = downloaded_volume_chapters == len(volume_chapters)
+                    else:
+                        # For grouped chapters (Chapters_XXX-YYY), export when we have 10 chapters or reach the end
+                        group_range = group_name.split('_')[1]  # Extract "001-010" from "Chapters_001-010"
+                        if group_range:
+                            start_num = int(group_range.split('-')[0])
+                            end_num = int(group_range.split('-')[1])
+                            expected_count = end_num - start_num + 1
+                            should_export = chapters_in_group == expected_count
+                    
+                    # Also export if this is the last chapter in the entire queue
+                    if i == len(chapter_queue) - 1:
+                        should_export = True
+                    
+                    if should_export and group_name not in completed_groups:
+                        print(f"\n--- Exporting completed {group_name} ---")
+                        try:
+                            # Export to CBZ and PDF
+                            exporter.export_to_cbz(str(group_folder), manga_title, group_name)
+                            exporter.export_to_pdf(str(group_folder), manga_title, group_name)
+                            
+                            # Clean up raw image folders to save space
+                            print(f"Cleaning up raw images in {group_folder}...")
+                            for chapter_subdir in group_folder.iterdir():
+                                if chapter_subdir.is_dir():
+                                    try:
+                                        shutil.rmtree(chapter_subdir)
+                                        print(f"  Removed: {chapter_subdir.name}")
+                                    except Exception as e:
+                                        print(f"  Failed to remove {chapter_subdir.name}: {e}")
+                            
+                            completed_groups.add(group_name)
+                            print(f"✓ Exported {group_name}")
+                            
+                        except Exception as e:
+                            print(f"✗ Failed to export {group_name}: {e}")
                 else:
                     failed_downloads += 1
                     print(f"✗ Failed to download chapter {i+1}")
@@ -337,6 +404,53 @@ class MangaDownloader:
         print(f"Successful: {successful_downloads}")
         print(f"Failed: {failed_downloads}")
         print(f"Completed: {successful_downloads + failed_downloads}")
+        print(f"Exported volumes/groups: {len(completed_groups)}")
+        
+        # Export any remaining groups that weren't exported during the loop
+        remaining_groups = []
+        for group_folder in manga_base_dir.iterdir():
+            if group_folder.is_dir() and group_folder.name not in completed_groups:
+                remaining_groups.append(group_folder)
+        
+        if remaining_groups:
+            print(f"\n=== Exporting Remaining Groups ===")
+            for group_folder in remaining_groups:
+                group_name = group_folder.name
+                print(f"\n--- Exporting remaining {group_name} ---")
+                try:
+                    exporter.export_to_cbz(str(group_folder), manga_title, group_name)
+                    exporter.export_to_pdf(str(group_folder), manga_title, group_name)
+                    
+                    # Clean up
+                    for chapter_subdir in group_folder.iterdir():
+                        if chapter_subdir.is_dir():
+                            try:
+                                shutil.rmtree(chapter_subdir)
+                                print(f"  Removed: {chapter_subdir.name}")
+                            except Exception as e:
+                                print(f"  Failed to remove {chapter_subdir.name}: {e}")
+                    
+                    print(f"✓ Exported {group_name}")
+                except Exception as e:
+                    print(f"✗ Failed to export {group_name}: {e}")
+        
+        print(f"\n=== Complete Workflow Finished ===")
+        print(f"Downloaded, enhanced, and exported manga to CBZ and PDF formats")
+    
+    def _get_volume_for_chapter(self, chapter_id: str) -> str:
+        """Helper method to determine which volume a chapter belongs to."""
+        try:
+            url = f"https://api.mangadex.org/chapter/{chapter_id}"
+            response = self.api_client.session.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                attrs = data.get('data', {}).get('attributes', {})
+                volume = attrs.get('volume')
+                if volume and volume.strip():
+                    return f"Volume_{int(float(volume)):02d}"
+        except:
+            pass
+        return None
     
     def download_chapters_sequence(self, start_chapter_id: str):
         """Download a sequence of chapters starting from the given ID."""
@@ -391,12 +505,13 @@ class MangaDownloader:
         print(f"\nDownload completed. Processed {chapter_count} chapters.")
 
 
-def main():
-    """Main function to download manga chapters."""
+def main_workflow():
+    """Main workflow that combines downloading and export."""
     downloader = MangaDownloader()
+    # enhancer = MangaEnhancer()  # Temporarily disabled due to dependency issues
     
-    print("=== MangaDex Chapter Downloader ===")
-    print("Enter a MangaDex URL or Chapter UUID to download")
+    print("=== MangaDex Downloader Workflow ===")
+    print("Enter a MangaDex URL or Chapter UUID to download and export")
     print("Examples:")
     print("  - https://mangadex.org/chapter/d9f90199-79fb-403f-a313-a054f1a77b0c")
     print("  - https://mangadex.org/title/a9232d4b-9e89-49bb-bb7c-3a0c6e4b5c1a")
@@ -435,16 +550,89 @@ def main():
             return
         
         print(f"\nFound {len(download_queue)} chapters in pt-br")
-        print("Starting download...")
+        print("Starting download and export workflow...")
         
-        # Start the download
+        # Download chapters (enhancement temporarily disabled)
         downloader.download_manga_queue(manga_id)
         
+        print(f"\n=== Complete Workflow Finished ===")
+        print(f"Downloaded and exported manga to CBZ and PDF formats")
+        print("Note: Enhancement temporarily disabled due to dependency issues")
+        
     except KeyboardInterrupt:
-        print("\nDownload interrupted by user")
+        print("\nWorkflow interrupted by user")
     except Exception as e:
         print(f"Error: {e}")
         print("Please check your input and try again.")
+
+
+def main():
+    """Main function to download manga chapters."""
+    downloader = MangaDownloader()
+    
+    print("=== MangaDex Chapter Downloader ===")
+    print("Choose workflow:")
+    print("1. Download only")
+    print("2. Download + Export (recommended)")
+    print("Note: Enhancement temporarily disabled due to dependency issues")
+    
+    choice = input("Enter choice (1 or 2, default=2): ").strip()
+    
+    if choice == "1":
+        # Original download workflow
+        print("\n=== Download Only Mode ===")
+        print("Enter a MangaDex URL or Chapter UUID to download")
+        print("Examples:")
+        print("  - https://mangadex.org/chapter/d9f90199-79fb-403f-a313-a054f1a77b0c")
+        print("  - https://mangadex.org/title/a9232d4b-9e89-49bb-bb7c-3a0c6e4b5c1a")
+        print("  - d9f90199-79fb-403f-a313-a054f1a77b0c")
+        print()
+        
+        # Get user input
+        user_input = input("Enter MangaDex URL or Chapter UUID: ").strip()
+        
+        if not user_input:
+            print("No input provided. Exiting.")
+            return
+        
+        try:
+            # Extract manga ID from user input
+            manga_id = downloader.get_manga_id_from_input(user_input)
+            
+            # Get manga title for display
+            try:
+                manga_url = f"https://api.mangadex.org/manga/{manga_id}"
+                response = downloader.api_client.session.get(manga_url)
+                if response.status_code == 200:
+                    manga_data = response.json()
+                    attributes = manga_data.get('data', {}).get('attributes', {})
+                    title = attributes.get('title', {})
+                    manga_title = title.get('en') or title.get('ja') or list(title.values())[0] if title else "Unknown Manga"
+                    print(f"\nManga: {manga_title}")
+            except:
+                manga_title = "Unknown Manga"
+            
+            # Get download queue
+            download_queue = downloader.get_download_queue(manga_id)
+            
+            if not download_queue:
+                print("No chapters found to download.")
+                return
+            
+            print(f"\nFound {len(download_queue)} chapters in pt-br")
+            print("Starting download...")
+            
+            # Start the download
+            downloader.download_manga_queue(manga_id)
+            
+        except KeyboardInterrupt:
+            print("\nDownload interrupted by user")
+        except Exception as e:
+            print(f"Error: {e}")
+            print("Please check your input and try again.")
+    else:
+        # Download + enhance workflow
+        main_workflow()
 
 
 if __name__ == "__main__":

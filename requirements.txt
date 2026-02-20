@@ -1,2 +1,10 @@
 requests
 tqdm
+opencv-python
+Pillow
+natsort
+# Enhancement dependencies (temporarily disabled due to compatibility issues)
+# torch==2.0.1
+# torchvision==0.15.2
+# basicsr==1.4.2
+# realesrgan==0.3.0

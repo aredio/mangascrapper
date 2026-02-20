@@ -17,6 +17,9 @@ __pycache__/
 # Downloads folder
 downloads/
 
+# Exports folder
+exports/
+
 # IDE
 .vscode/
 .idea/

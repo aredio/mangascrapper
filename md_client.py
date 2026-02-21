@@ -8,6 +8,9 @@ import requests
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import re
+import time
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import shutil
 
 
 class MangaDexDownloader:
@@ -18,6 +21,11 @@ class MangaDexDownloader:
             'User-Agent': 'MangaDex-Downloader/1.0'
         })
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=8),
+        retry=retry_if_exception_type((requests.RequestException, requests.ConnectionError, requests.Timeout))
+    )
     def get_chapter_data(self, chapter_id: str) -> Tuple[str, str, List[str]]:
         """
         Get chapter data from MangaDex API.
@@ -58,6 +66,11 @@ class MangaDexDownloader:
         except requests.RequestException as e:
             raise requests.RequestException(f"Failed to fetch chapter data: {e}")
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=8),
+        retry=retry_if_exception_type((requests.RequestException, requests.ConnectionError, requests.Timeout))
+    )
     def get_chapter_assets(self, chapter_id: str) -> Tuple[str, List[str]]:
         """
         Get high-quality chapter assets from MangaDex API.
@@ -102,37 +115,47 @@ class MangaDexDownloader:
         except requests.RequestException as e:
             raise requests.RequestException(f"Failed to fetch chapter assets: {e}")
     
-    def download_page(self, url: str, save_path: Path) -> bool:
+    def download_page(self, url: str, save_path: Path, max_retries: int = 3) -> bool:
         """
-        Download a single page image.
+        Download a single page image with retry logic.
         
         Args:
             url: URL of the image to download
             save_path: Path where to save the image
+            max_retries: Maximum number of retry attempts
             
         Returns:
             True if successful, False otherwise
         """
-        try:
-            response = self.session.get(url, stream=True)
-            response.raise_for_status()
-            
-            # Create parent directories if they don't exist
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(save_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            return True
-            
-        except requests.RequestException as e:
-            print(f"Failed to download {url}: {e}")
-            return False
-        except IOError as e:
-            print(f"Failed to save file {save_path}: {e}")
-            return False
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                
+                # Create parent directories if they don't exist
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                return True
+                
+            except (requests.RequestException, requests.ConnectionError, requests.Timeout) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # 2, 4, 8 seconds
+                    print(f"Download failed for {save_path.name}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"Failed to download {url} after {max_retries} attempts: {e}")
+                    return False
+            except IOError as e:
+                print(f"Failed to save file {save_path}: {e}")
+                return False
+        
+        return False
     
     def build_page_url(self, base_url: str, chapter_hash: str, filename: str, data_saver: bool = True) -> str:
         """
@@ -184,35 +207,60 @@ class MangaDexDownloader:
     
     def get_manga_feed(self, manga_id: str, language: str = "pt-br") -> List[Dict]:
         """
-        Get manga feed (list of chapters) for a specific manga.
+        Get manga feed (list of chapters) for a specific manga with pagination support.
         
         Args:
             manga_id: The manga UUID
             language: Language code (default: pt-br)
             
         Returns:
-            List of chapter dictionaries
+            List of chapter dictionaries (all chapters)
             
         Raises:
             requests.RequestException: If API request fails
         """
-        params = {
-            'translatedLanguage[]': language,
-            'order[chapter]': 'asc'  # Get chapters in ascending order
-        }
+        all_chapters = []
+        offset = 0
+        limit = 100
         
-        url = f"{self.base_url}/manga/{manga_id}/feed"
+        while True:
+            params = {
+                'translatedLanguage[]': language,
+                'order[chapter]': 'asc',  # Get chapters in ascending order
+                'limit': limit,
+                'offset': offset
+            }
+            
+            url = f"{self.base_url}/manga/{manga_id}/feed"
+            
+            try:
+                response = self.session.get(url, params=params)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                # Get chapters from this page
+                chapters = data.get('data', [])
+                all_chapters.extend(chapters)
+                
+                # Check if we need to continue pagination
+                # Break if we got fewer chapters than the limit (last page)
+                # or if we've reached the total count
+                total = data.get('total', 0)
+                
+                print(f"Fetched {len(chapters)} chapters (offset: {offset}, total: {total})")
+                
+                if len(chapters) < limit or len(all_chapters) >= total:
+                    break
+                
+                # Increase offset for next page
+                offset += limit
+                
+            except requests.RequestException as e:
+                raise requests.RequestException(f"Failed to fetch manga feed at offset {offset}: {e}")
         
-        try:
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            return data.get('data', [])
-            
-        except requests.RequestException as e:
-            raise requests.RequestException(f"Failed to fetch manga feed: {e}")
+        print(f"Total chapters fetched: {len(all_chapters)}")
+        return all_chapters
     
     def parse_chapter_number(self, chapter_attr: Dict) -> Optional[float]:
         """

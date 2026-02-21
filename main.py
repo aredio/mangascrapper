@@ -43,7 +43,7 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
             try:
                 result = subprocess.run([
                     'python', 'waifu2x_batch_processor.py',
-                    '-i', str(raw_folder_path),
+                    str(raw_folder_path),
                     '-o', str(upscaled_folder_path),
                     '-n', '2',
                     '-s', '2'
@@ -103,7 +103,7 @@ class MangaDownloader:
         self.base_download_dir = Path(base_download_dir)
         self.base_download_dir.mkdir(exist_ok=True)
         self.api_client = MangaDexDownloader()
-        self.image_downloader = HighResDownloader()
+        self.image_downloader = HighResDownloader(self.api_client)
     
     def download_chapter_images_high_res(self, chapter_id: str, chapter_dir: Path) -> bool:
         """Download high-quality images for a chapter."""

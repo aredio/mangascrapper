@@ -7,13 +7,16 @@ Handles downloading of high-quality manga images with progress tracking and retr
 import requests
 import time
 from pathlib import Path
-from typing import Optional, List, Dict
-from tqdm import tqdm
+from typing import List, Dict, Optional
+import requests
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from tqdm import tqdm
+import shutil
 
 class HighResDownloader:
-    def __init__(self, max_workers: int = 3):
+    def __init__(self, md_client, max_workers: int = 3):
+        self.md_client = md_client
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'MangaDex-HighRes-Downloader/1.0'
@@ -24,7 +27,7 @@ class HighResDownloader:
     
     def download_high_res_image(self, url: str, path: Path) -> bool:
         """
-        Download a high-resolution image with progress tracking and retry logic.
+        Download a high-resolution image with retry logic using MD client.
         
         Args:
             url: URL of the image to download
@@ -33,18 +36,8 @@ class HighResDownloader:
         Returns:
             True if download succeeded, False if failed after all retries
         """
-        for attempt in range(self.max_retries):
-            try:
-                return self._download_with_progress(url, path)
-            except Exception as e:
-                if attempt < self.max_retries - 1:
-                    print(f"Download attempt {attempt + 1} failed: {e}")
-                    print(f"Retrying in {self.retry_delay} seconds...")
-                    time.sleep(self.retry_delay)
-                else:
-                    print(f"Download failed after {self.max_retries} attempts: {e}")
-                    return False
-        return False
+        # Use the MD client's download_page method for consistent retry logic
+        return self.md_client.download_page(url, path, max_retries=3)
     
     def _download_with_progress(self, url: str, path: Path) -> bool:
         """
@@ -377,6 +370,7 @@ class HighResDownloader:
     def download_chapter_with_verification(self, chapter_id: str, base_dir: Path) -> bool:
         """
         Download chapter with language verification and high-quality assets.
+        Includes error handling for failed chapters with cleanup.
         
         Args:
             chapter_id: Chapter UUID
@@ -390,38 +384,43 @@ class HighResDownloader:
             print(f"Skipping chapter {chapter_id}: Not pt-br language")
             return False
         
-        # Get high-quality assets
+        # Get high-quality assets using MD client with retry logic
         try:
-            manga_url = f"https://api.mangadex.org/at-home/server/{chapter_id}"
-            response = self.session.get(manga_url)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if 'baseUrl' not in data or 'chapter' not in data:
-                print(f"Invalid response format for chapter {chapter_id}")
-                return False
-            
-            chapter_info = data['chapter']
-            if 'hash' not in chapter_info or 'data' not in chapter_info:
-                print(f"Invalid chapter data format for chapter {chapter_id}")
-                return False
-            
-            base_url = data['baseUrl']
-            chapter_hash = chapter_info['hash']
-            filenames = chapter_info['data']  # Use high-quality data array
-            
-            # Build full image URLs
-            image_urls = []
-            for filename in filenames:
-                full_url = f"{base_url}/data/{chapter_hash}/{filename}"
-                image_urls.append(full_url)
+            base_url, image_urls = self.md_client.get_chapter_assets(chapter_id)
             
             # Download images concurrently
             results = self.download_images_concurrent(image_urls, base_dir)
             
-            return len(results['successful']) > 0
-            
+            # Check if download was successful
+            if len(results['successful']) > 0:
+                print(f"Successfully downloaded {len(results['successful'])}/{len(image_urls)} images")
+                return True
+            else:
+                print(f"Failed to download any images for chapter {chapter_id}")
+                # Clean up empty directory
+                self._cleanup_failed_chapter(base_dir, chapter_id)
+                return False
+                
         except Exception as e:
             print(f"Error downloading chapter {chapter_id}: {e}")
+            # Clean up empty directory on any failure
+            self._cleanup_failed_chapter(base_dir, chapter_id)
             return False
+    
+    def _cleanup_failed_chapter(self, chapter_dir: Path, chapter_id: str):
+        """
+        Clean up failed chapter directory to prevent empty folders in exports.
+        
+        Args:
+            chapter_dir: Directory to clean up
+            chapter_id: Chapter ID for logging
+        """
+        try:
+            if chapter_dir.exists() and chapter_dir.is_dir():
+                # Check if directory is empty or contains only partial downloads
+                files = list(chapter_dir.glob('*'))
+                if len(files) == 0 or all(f.suffix in ['.tmp', '.part'] for f in files):
+                    shutil.rmtree(chapter_dir)
+                    print(f"Cleaned up empty/partial directory for chapter {chapter_id}")
+        except Exception as e:
+            print(f"Failed to cleanup chapter directory {chapter_dir}: {e}")

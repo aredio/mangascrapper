@@ -139,8 +139,8 @@ class Waifu2xProcessor:
         if not input_path.is_dir():
             raise NotADirectoryError(f"Input path is not a directory: {input_folder}")
         
-        # Create output directory
-        output_path.mkdir(parents=True, exist_ok=True)
+        # Create output directory explicitly before subprocess call
+        os.makedirs(output_folder, exist_ok=True)
         
         print(f"Processing folder: {input_folder}")
         print(f"Output folder: {output_folder}")
@@ -148,9 +148,9 @@ class Waifu2xProcessor:
         print("-" * 50)
         
         try:
-            # Build waifu2x command with exact format required
+            # Build waifu2x command with strict format as required
             cmd = [
-                self.waifu2x_path,
+                'waifu2x-ncnn-vulkan',
                 '-i', str(input_folder),
                 '-o', str(output_folder),
                 '-n', str(noise_level),
@@ -163,7 +163,7 @@ class Waifu2xProcessor:
             
             print(f"Running command: {' '.join(cmd)}")
             
-            # Run waifu2x with timeout
+            # Run waifu2x with timeout and proper error capture
             start_time = time.time()
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
             
@@ -190,6 +190,12 @@ class Waifu2xProcessor:
                 print(f"Error: {result.stderr}")
                 print(f"Return code: {result.returncode}")
                 
+        except subprocess.CalledProcessError as e:
+            print("-" * 50)
+            print(f"Processing failed with CalledProcessError!")
+            print(f"Error output from waifu2x: {e.stderr}")
+            print(f"Return code: {e.returncode}")
+            print(f"Command that failed: {' '.join(cmd)}")
         except subprocess.TimeoutExpired:
             print("✗ Timeout: Processing took too long (1 hour limit reached)")
         except Exception as e:

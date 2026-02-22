@@ -40,6 +40,37 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
         raw_folder_path: Path to the raw downloaded folder
         config: Dictionary containing user choices ('do_upscale', 'export_cbz', 'export_pdf')
     """
+    # Validation: Check if folder contains valid image files
+    try:
+        raw_path = Path(raw_folder_path)
+        if not raw_path.exists():
+            logger.warning(f"Folder does not exist, skipping: {raw_folder_path}")
+            return
+        
+        # Scan for valid image files
+        valid_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif'}
+        image_files = []
+        
+        for file_path in raw_path.rglob('*'):
+            if file_path.is_file() and file_path.suffix.lower() in valid_extensions:
+                image_files.append(file_path)
+        
+        # If no images found, skip processing and clean up
+        if len(image_files) == 0:
+            logger.warning(f"Skipping empty/failed folder with no images: {volume_name}")
+            try:
+                shutil.rmtree(raw_folder_path, ignore_errors=True)
+                logger.info(f"Cleaned up empty directory: {raw_folder_path}")
+            except Exception as e:
+                logger.error(f"Failed to cleanup empty directory {raw_folder_path}: {e}")
+            return
+        
+        logger.info(f"Processing folder with {len(image_files)} images: {volume_name}")
+        
+    except Exception as e:
+        logger.error(f"Error validating folder {raw_folder_path}: {e}")
+        return
+    
     working_folder = raw_folder_path
     upscaled_folder = None
     

@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import re
 import time
+import logging
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import shutil
+
+logger = logging.getLogger(__name__)
 
 
 class MangaDexDownloader:
@@ -145,14 +148,14 @@ class MangaDexDownloader:
             except (requests.RequestException, requests.ConnectionError, requests.Timeout) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # 2, 4, 8 seconds
-                    print(f"Download failed for {save_path.name}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    logger.warning(f"Download failed for {save_path.name}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
                     time.sleep(wait_time)
                     continue
                 else:
-                    print(f"Failed to download {url} after {max_retries} attempts: {e}")
+                    logger.error(f"Failed to download {url} after {max_retries} attempts: {e}")
                     return False
             except IOError as e:
-                print(f"Failed to save file {save_path}: {e}")
+                logger.error(f"Failed to save file {save_path}: {e}")
                 return False
         
         return False
@@ -219,11 +222,14 @@ class MangaDexDownloader:
         Raises:
             requests.RequestException: If API request fails
         """
-        all_chapters = []
-        offset = 0
+        # Initialize
         limit = 100
+        offset = 0
+        all_chapters = []
         
+        # Create a while True loop
         while True:
+            # Set the params dictionary to include limit and offset
             params = {
                 'translatedLanguage[]': language,
                 'order[chapter]': 'asc',  # Get chapters in ascending order
@@ -234,32 +240,31 @@ class MangaDexDownloader:
             url = f"{self.base_url}/manga/{manga_id}/feed"
             
             try:
+                # Make the requests.get call to the feed endpoint
                 response = self.session.get(url, params=params)
                 response.raise_for_status()
                 
                 data = response.json()
                 
-                # Get chapters from this page
+                # Extract the data array from the JSON response
                 chapters = data.get('data', [])
+                
+                # Extend the all_chapters list with this new data
                 all_chapters.extend(chapters)
                 
-                # Check if we need to continue pagination
-                # Break if we got fewer chapters than the limit (last page)
-                # or if we've reached the total count
-                total = data.get('total', 0)
+                logger.info(f"Fetched {len(chapters)} chapters (offset: {offset})")
                 
-                print(f"Fetched {len(chapters)} chapters (offset: {offset}, total: {total})")
-                
-                if len(chapters) < limit or len(all_chapters) >= total:
+                # Check the break condition
+                if len(chapters) < limit:
                     break
                 
-                # Increase offset for next page
+                # Increment the offset
                 offset += limit
                 
             except requests.RequestException as e:
                 raise requests.RequestException(f"Failed to fetch manga feed at offset {offset}: {e}")
         
-        print(f"Total chapters fetched: {len(all_chapters)}")
+        logger.info(f"Total chapters fetched: {len(all_chapters)}")
         return all_chapters
     
     def parse_chapter_number(self, chapter_attr: Dict) -> Optional[float]:
@@ -334,7 +339,7 @@ class MangaDexDownloader:
             return next_chapter_id
             
         except (requests.RequestException, ValueError) as e:
-            print(f"Error finding next chapter: {e}")
+            logger.error(f"Error finding next chapter: {e}")
             return None
     
     def create_chapter_folder_structure(self, chapter_id: str, base_dir: Path) -> Path:
@@ -372,9 +377,8 @@ class MangaDexDownloader:
             return chapter_dir
             
         except (requests.RequestException, ValueError) as e:
-            print(f"Error creating folder structure: {e}")
+            logger.error(f"Error creating folder structure: {e}")
             # Fallback to UUID-based folder
             fallback_dir = base_dir / chapter_id
             fallback_dir.mkdir(parents=True, exist_ok=True)
             return fallback_dir
-""

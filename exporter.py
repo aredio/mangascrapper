@@ -2,6 +2,9 @@ import os
 import zipfile
 from PIL import Image
 from natsort import natsorted
+import logging
+
+logger = logging.getLogger(__name__)
 
 class MangaExporter:
     def __init__(self, output_dir="exports"):
@@ -54,13 +57,13 @@ class MangaExporter:
         """Generate CBZ file with naturally sorted images and continuous numbering."""
         images = self.get_all_images(source_folder)
         if not images:
-            print(f"No images found in {source_folder} for CBZ export.")
+            logger.warning(f"No images found in {source_folder} for CBZ export.")
             return
 
         cbz_filename = f"{manga_name} - {group_name}.cbz"
         cbz_path = os.path.join(self.output_dir, cbz_filename)
 
-        print(f"Creating CBZ: {cbz_path} with {len(images)} pages...")
+        logger.info(f"Creating CBZ: {cbz_path} with {len(images)} pages...")
         
         # ZIP_STORED is used because images are already compressed
         with zipfile.ZipFile(cbz_path, 'w', zipfile.ZIP_STORED) as cbz:
@@ -73,19 +76,19 @@ class MangaExporter:
                 arcname = f"{i+1:04d}{ext}"  # Start from 0001, not 0000
                 cbz.write(img_path, arcname)
                 
-        print(f"✓ CBZ export completed: {cbz_filename}")
+        logger.info(f"✓ CBZ export completed: {cbz_filename}")
 
     def export_to_pdf(self, source_folder, manga_name, group_name):
         """Generate PDF file with naturally sorted images."""
         images = self.get_all_images(source_folder)
         if not images:
-            print(f"No images found in {source_folder} for PDF export.")
+            logger.warning(f"No images found in {source_folder} for PDF export.")
             return
 
         pdf_filename = f"{manga_name} - {group_name}.pdf"
         pdf_path = os.path.join(self.output_dir, pdf_filename)
 
-        print(f"Creating PDF: {pdf_path} with {len(images)} pages...")
+        logger.info(f"Creating PDF: {pdf_path} with {len(images)} pages...")
 
         pil_images = []
         for img_path in images:
@@ -96,7 +99,7 @@ class MangaExporter:
                     img = img.convert('RGB')
                 pil_images.append(img)
             except Exception as e:
-                print(f"Warning: Could not process image {img_path}: {e}")
+                logger.warning(f"Warning: Could not process image {img_path}: {e}")
                 continue
 
         # Save first image and append the rest to the same file
@@ -108,11 +111,11 @@ class MangaExporter:
                     append_images=pil_images[1:],
                     resolution=100.0  # Base pixel density
                 )
-                print(f"✓ PDF export completed: {pdf_filename}")
+                logger.info(f"✓ PDF export completed: {pdf_filename}")
             except Exception as e:
-                print(f"Error saving PDF: {e}")
+                logger.error(f"Failed to create PDF: {e}")
         else:
-            print("No valid images found for PDF export.")
+            logger.warning("No valid images found for PDF export.")
 
     def run_exports(self, source_folder, manga_name, group_name, make_cbz=True, make_pdf=True):
         """

@@ -10,11 +10,24 @@ import time
 import re
 import shutil
 import subprocess
+import logging
 from pathlib import Path
 from tqdm import tqdm
 from md_client import MangaDexDownloader
 from downloader import HighResDownloader
 from exporter import MangaExporter
+
+# Setup root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('py_tana_session.log', mode='w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 
 def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
@@ -33,7 +46,7 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
     try:
         # Step 1: Upscaling if requested
         if config.get('do_upscale', False):
-            print(f"Starting AI upscaling for {volume_name}...")
+            logger.info(f"Starting AI upscaling for {volume_name}...")
             
             # Define upscaled folder path
             upscaled_folder_path = Path(f"upscaled_temp/{manga_name}/{volume_name}")
@@ -49,12 +62,12 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
                     '-s', '2'
                 ], check=True, capture_output=True, text=True)
                 
-                print(f"✓ AI upscaling completed for {volume_name}")
+                logger.info(f"✓ AI upscaling completed for {volume_name}")
                 working_folder = upscaled_folder_path
                 
             except subprocess.CalledProcessError as e:
-                print(f"✗ AI upscaling failed for {volume_name}: {e}")
-                print(f"Error output: {e.stderr}")
+                logger.error(f"✗ AI upscaling failed for {volume_name}: {e}")
+                logger.error(f"Error output: {e.stderr}")
                 # Fall back to raw folder if upscaling fails
                 working_folder = raw_folder_path
             except Exception as e:
@@ -65,7 +78,7 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
             
         # Step 2: Export if requested
         if config.get('export_cbz', False) or config.get('export_pdf', False):
-            print(f"Starting export for {volume_name}...")
+            logger.info(f"Starting export for {volume_name}...")
             
             exporter = MangaExporter()
             exporter.run_exports(
@@ -75,7 +88,7 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
                 make_cbz=config.get('export_cbz', False),
                 make_pdf=config.get('export_pdf', False)
             )
-            print(f"✓ Export completed for {volume_name}")
+            logger.info(f"✓ Export completed for {volume_name}")
         
         # Step 3: Cleanup if export was performed
         if config.get('export_cbz', False) or config.get('export_pdf', False):
@@ -94,7 +107,7 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
         print(f"✓ Processing completed for {volume_name}")
         
     except Exception as e:
-        print(f"✗ Error processing {volume_name}: {e}")
+        logger.error(f"✗ Error processing {volume_name}: {e}")
         # Don't delete folders on error to allow manual recovery
 
 
@@ -313,29 +326,49 @@ class MangaDownloader:
     
     def get_download_queue(self, manga_id: str) -> list:
         """Get the download queue for a manga (pt-br chapters in ascending order)."""
-        print(f"Fetching download queue for manga {manga_id}...")
+        logger.info(f"Fetching download queue for manga {manga_id}...")
         
-        # Get raw manga feed
+        # Get raw manga feed with pagination
         try:
-            feed_url = f"https://api.mangadex.org/manga/{manga_id}/feed"
-            params = {
-                'translatedLanguage[]': 'pt-br',
-                'order[chapter]': 'asc'
-            }
+            limit = 100
+            offset = 0
+            all_chapters = []
+
+            logger.info(f"Buscando lista completa de capítulos na API...")
+
+            while True:
+                params = {
+                    "limit": limit,
+                    "offset": offset,
+                    "translatedLanguage[]": ["pt-br"],
+                    "order[chapter]": "asc",
+                    "includes[]": ["scanlation_group"]
+                }
+
+                response = self.api_client.session.get(f"https://api.mangadex.org/manga/{manga_id}/feed", params=params)
+                response.raise_for_status()
+                
+                data = response.json().get("data", [])
+                all_chapters.extend(data)
+                
+                logger.info(f"Fetched {len(data)} chapters (offset: {offset})")
+                
+                # If the API returned less than our limit, we reached the end of the manga
+                if len(data) < limit:
+                    break
+                    
+                # Otherwise, turn the page
+                offset += limit
+
+            logger.info(f"Total chapters fetched: {len(all_chapters)}")
             
-            response = self.api_client.session.get(feed_url, params=params)
-            response.raise_for_status()
-            
-            feed_data = response.json()
-            chapters = feed_data.get('data', [])
-            
-            if not chapters:
-                print("No chapters found in pt-br for this manga")
+            if not all_chapters:
+                logger.warning("No chapters found in pt-br for this manga")
                 return []
             
             # Group chapters by chapter number to find best version
             chapter_groups = {}
-            for chapter in chapters:
+            for chapter in all_chapters:
                 attrs = chapter.get('attributes', {})
                 chapter_num = attrs.get('chapter')
                 
@@ -364,11 +397,11 @@ class MangaDownloader:
             # Extract chapter IDs
             chapter_queue = [chapter['id'] for chapter in best_chapters]
             
-            print(f"Download queue created with {len(chapter_queue)} chapters (best versions selected)")
+            logger.info(f"Download queue created with {len(chapter_queue)} chapters (best versions selected)")
             return chapter_queue
             
         except Exception as e:
-            print(f"Error creating download queue: {e}")
+            logger.error(f"Error creating download queue: {e}")
             return []
     
     def download_manga_queue(self, manga_id: str, config=None):

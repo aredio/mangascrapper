@@ -81,28 +81,33 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
             
             # Define upscaled folder path
             upscaled_folder_path = Path(f"upscaled_temp/{manga_name}/{volume_name}")
-            upscaled_folder_path.mkdir(parents=True, exist_ok=True)
+            # Forcefully create output directory to prevent C++ execution errors
+            os.makedirs(upscaled_folder_path, exist_ok=True)
             
-            # Run external waifu2x processor
+            # Run waifu2x binary directly
             try:
-                result = subprocess.run([
-                    'python', 'waifu2x_batch_processor.py',
-                    str(raw_folder_path),
+                cmd = [
+                    'waifu2x-ncnn-vulkan',
+                    '-i', str(raw_folder_path),
                     '-o', str(upscaled_folder_path),
                     '-n', '2',
-                    '-s', '2'
-                ], check=True, capture_output=True, text=True)
+                    '-s', '2',
+                    '-f', 'jpg'
+                ]
+                
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
                 
                 logger.info(f"✓ AI upscaling completed for {volume_name}")
                 working_folder = upscaled_folder_path
                 
             except subprocess.CalledProcessError as e:
                 logger.error(f"✗ AI upscaling failed for {volume_name}: {e}")
-                logger.error(f"Error output: {e.stderr}")
+                logger.error(f"stdout: {e.stdout}")
+                logger.error(f"stderr: {e.stderr}")
                 # Fall back to raw folder if upscaling fails
                 working_folder = raw_folder_path
             except Exception as e:
-                print(f"✗ Unexpected error during upscaling: {e}")
+                logger.error(f"✗ Unexpected error during upscaling: {e}")
                 working_folder = raw_folder_path
         else:
             working_folder = raw_folder_path

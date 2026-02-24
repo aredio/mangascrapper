@@ -84,21 +84,44 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
             # Forcefully create output directory to prevent C++ execution errors
             os.makedirs(upscaled_folder_path, exist_ok=True)
             
-            # Run waifu2x binary directly
+            # Run waifu2x binary directly on each chapter subdirectory
             try:
-                cmd = [
-                    'waifu2x-ncnn-vulkan',
-                    '-i', str(raw_folder_path),
-                    '-o', str(upscaled_folder_path),
-                    '-n', '2',
-                    '-s', '2',
-                    '-f', 'jpg'
-                ]
+                # Iterate through chapter subdirectories inside raw_folder_path
+                processed_chapters = 0
+                for item in os.listdir(raw_folder_path):
+                    chapter_in = os.path.join(raw_folder_path, item)
+                    
+                    if os.path.isdir(chapter_in):
+                        chapter_out = os.path.join(upscaled_folder_path, item)
+                        os.makedirs(chapter_out, exist_ok=True)
+                        
+                        logger.info(f"Upscaling chapter: {item}")
+                        
+                        cmd = [
+                            'waifu2x-ncnn-vulkan',
+                            '-i', str(chapter_in),
+                            '-o', str(chapter_out),
+                            '-n', '2',
+                            '-s', '2',
+                            '-f', 'jpg',
+                            '-g', '0',
+                            '-j', '1:1:1'
+                        ]
+                        
+                        try:
+                            subprocess.run(cmd, check=True, capture_output=True, text=True)
+                            processed_chapters += 1
+                            logger.info(f"✓ Upscaled chapter: {item}")
+                        except subprocess.CalledProcessError as e:
+                            logger.error(f"Waifu2x failed on {item}: {e.stderr}")
+                            raise  # Re-raise to trigger the fallback logic
                 
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                
-                logger.info(f"✓ AI upscaling completed for {volume_name}")
-                working_folder = upscaled_folder_path
+                if processed_chapters > 0:
+                    logger.info(f"✓ AI upscaling completed for {volume_name} ({processed_chapters} chapters)")
+                    working_folder = upscaled_folder_path
+                else:
+                    logger.warning(f"No chapters found to upscale in {volume_name}")
+                    working_folder = raw_folder_path
                 
             except subprocess.CalledProcessError as e:
                 logger.error(f"✗ AI upscaling failed for {volume_name}: {e}")

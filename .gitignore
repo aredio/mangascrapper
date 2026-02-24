@@ -20,6 +20,9 @@ downloads/
 # Exports folder
 exports/
 
+# Upscaled_temp folder
+upscaled_temp/
+
 # IDE
 .vscode/
 .idea/

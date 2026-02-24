@@ -208,6 +208,41 @@ class MangaDexDownloader:
         except requests.RequestException as e:
             raise requests.RequestException(f"Failed to fetch chapter info: {e}")
     
+    def get_single_chapter_by_number(self, manga_id: str, chapter_number: str, fallback_lang: str = "en"):
+        """
+        Get a single chapter by chapter number in fallback language.
+        
+        Args:
+            manga_id: The manga ID to search in
+            chapter_number: The chapter number to find
+            fallback_lang: Language code (default: "en")
+            
+        Returns:
+            Chapter object if found, None otherwise
+        """
+        try:
+            params = {
+                "chapter": chapter_number,
+                "translatedLanguage[]": [fallback_lang],
+                "limit": 1,
+                "order[chapter]": "asc"
+            }
+            
+            response = self.session.get(f"{self.base_url}/manga/{manga_id}/feed", params=params)
+            response.raise_for_status()
+            
+            data = response.json().get("data", [])
+            if data:
+                logger.info(f"Found fallback chapter {chapter_number} in {fallback_lang}")
+                return data[0]
+            else:
+                logger.warning(f"No fallback chapter {chapter_number} found in {fallback_lang}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error fetching fallback chapter {chapter_number}: {e}")
+            return None
+    
     def get_manga_feed(self, manga_id: str, language: str = "pt-br") -> List[Dict]:
         """
         Get manga feed (list of chapters) for a specific manga with pagination support.

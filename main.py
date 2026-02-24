@@ -313,6 +313,81 @@ class MangaDownloader:
             fallback_dir.mkdir(parents=True, exist_ok=True)
             return fallback_dir
     
+    def _get_chapter_number_from_id(self, chapter_id: str) -> str:
+        """
+        Get chapter number from chapter ID by fetching chapter info.
+        
+        Args:
+            chapter_id: The chapter UUID
+            
+        Returns:
+            Chapter number as string, or "unknown" if not found
+        """
+        try:
+            response = self.api_client.session.get(f"https://api.mangadex.org/chapter/{chapter_id}")
+            response.raise_for_status()
+            
+            chapter_data = response.json().get('data', {})
+            chapter_attrs = chapter_data.get('attributes', {})
+            chapter_num = chapter_attrs.get('chapter')
+            
+            return chapter_num if chapter_num else "unknown"
+            
+        except Exception as e:
+            logger.warning(f"Error getting chapter number for {chapter_id}: {e}")
+            return "unknown"
+    
+    def _safe_parse_chapter_number(self, chapter_str: str) -> float:
+        """
+        Safely parse chapter number string to float.
+        
+        Args:
+            chapter_str: Chapter number as string (can be "15.5", "15", etc.)
+            
+        Returns:
+            float: Parsed chapter number, or 0.0 if parsing fails
+        """
+        try:
+            if not chapter_str or chapter_str.strip() == "":
+                return 0.0
+            return float(chapter_str.strip())
+        except (ValueError, TypeError):
+            print(f"Aviso: Não foi possível parsear número do capítulo '{chapter_str}'. Usando 0.0")
+            return 0.0
+    
+    def _filter_chapters_by_number(self, chapters: list, start_float: float, end_float: float) -> list:
+        """
+        Filter chapters by chapter number range.
+        
+        Args:
+            chapters: List of chapter data dictionaries
+            start_float: Start chapter number (inclusive)
+            end_float: End chapter number (inclusive)
+            
+        Returns:
+            list: Filtered chapter data within the specified range
+        """
+        filtered_chapters = []
+        
+        for chapter in chapters:
+            try:
+                chapter_attrs = chapter.get('attributes', {})
+                chapter_num_str = chapter_attrs.get('chapter')
+                
+                # Parse chapter number safely
+                chapter_float = self._safe_parse_chapter_number(chapter_num_str)
+                
+                # Check if chapter is within range (inclusive)
+                if start_float <= chapter_float <= end_float:
+                    filtered_chapters.append(chapter)
+                    
+            except Exception as e:
+                logger.warning(f"Error filtering chapter {chapter.get('id', 'unknown')}: {e}")
+                # If we can't get chapter info, skip it
+                continue
+        
+        return filtered_chapters
+    
     def get_full_manga_feed(self, manga_id: str) -> list:
         """Get the complete manga feed with pt-br chapters in order."""
         try:
@@ -382,6 +457,92 @@ class MangaDownloader:
             print(f"Error getting manga ID from chapter: {e}")
         
         raise ValueError(f"Could not extract manga ID from: {url_or_uuid}")
+    
+    def get_download_queue_with_data(self, manga_id: str) -> tuple:
+        """
+        Get the complete download queue with full chapter data for filtering.
+        
+        Args:
+            manga_id: The manga ID to fetch chapters for
+            
+        Returns:
+            tuple: (chapter_ids, chapter_data) where chapter_ids is for existing workflow
+                   and chapter_data is for filtering operations
+        """
+        try:
+            limit = 100
+            offset = 0
+            all_chapters = []
+            
+            logger.info(f"Fetching chapters for manga {manga_id}...")
+            
+            while True:
+                params = {
+                    "limit": limit,
+                    "offset": offset,
+                    "translatedLanguage[]": ["pt-br"],
+                    "order[chapter]": "asc",
+                    "includes[]": ["scanlation_group"]
+                }
+
+                response = self.api_client.session.get(f"https://api.mangadex.org/manga/{manga_id}/feed", params=params)
+                response.raise_for_status()
+                
+                data = response.json().get("data", [])
+                all_chapters.extend(data)
+                
+                logger.info(f"Fetched {len(data)} chapters (offset: {offset})")
+                
+                # If the API returned less than our limit, we reached the end of the manga
+                if len(data) < limit:
+                    break
+                    
+                # Otherwise, turn the page
+                offset += limit
+
+            logger.info(f"Total chapters fetched: {len(all_chapters)}")
+            
+            if not all_chapters:
+                logger.warning("No chapters found in pt-br for this manga")
+                return [], []
+            
+            # Group chapters by chapter number to find best version
+            chapter_groups = {}
+            for chapter in all_chapters:
+                attrs = chapter.get('attributes', {})
+                chapter_num = attrs.get('chapter')
+                
+                if chapter_num:
+                    if chapter_num not in chapter_groups:
+                        chapter_groups[chapter_num] = []
+                    chapter_groups[chapter_num].append(chapter)
+            
+            # Select best chapter for each group
+            best_chapters = []
+            for chapter_num, group in chapter_groups.items():
+                best_chapter = self.image_downloader.get_best_chapter_group(group)
+                if best_chapter:
+                    best_chapters.append(best_chapter)
+            
+            # Sort by chapter number
+            def sort_key(chapter):
+                chapter_num = chapter.get('attributes', {}).get('chapter', '0')
+                try:
+                    return float(chapter_num)
+                except:
+                    return 0
+            
+            best_chapters.sort(key=sort_key)
+            
+            # Extract chapter IDs for existing workflow
+            chapter_ids = [chapter['id'] for chapter in best_chapters]
+            
+            logger.info(f"Download queue created with {len(chapter_ids)} chapters (best versions selected)")
+            return chapter_ids, best_chapters
+            
+        except Exception as e:
+            logger.error(f"Error creating download queue: {e}")
+            return [], []
     
     def get_download_queue(self, manga_id: str) -> list:
         """Get the download queue for a manga (pt-br chapters in ascending order)."""
@@ -473,12 +634,80 @@ class MangaDownloader:
         # Default configuration if not provided
         if config is None:
             config = {'do_upscale': False, 'export_cbz': False, 'export_pdf': False}
-        # Get the download queue with best chapter selection
-        chapter_queue = self.get_download_queue(manga_id)
+        # Get the download queue with best chapter selection and full data
+        all_chapter_ids, all_chapter_data = self.get_download_queue_with_data(manga_id)
         
-        if not chapter_queue:
+        if not all_chapter_ids:
             print("No chapters found to download")
             return
+        
+        # Chapter Selection Step
+        print(f"\n=== Seleção de Capítulos ===")
+        print(f"Total de capítulos encontrados: {len(all_chapter_ids)}")
+        print("1 - Baixar tudo (Full)")
+        print("2 - Baixar capítulo específico")
+        print("3 - Baixar um intervalo (Range)")
+        
+        while True:
+            try:
+                choice = input("Escolha uma opção (1-3): ").strip()
+                if choice in ['1', '2', '3']:
+                    break
+                else:
+                    print("Opção inválida. Escolha 1, 2 ou 3.")
+            except KeyboardInterrupt:
+                print("\nDownload cancelado pelo usuário.")
+                return
+        
+        filtered_chapter_data = []
+        
+        if choice == '1':
+            # Full download
+            filtered_chapter_data = all_chapter_data
+            print(f"Opção selecionada: Baixar tudo ({len(filtered_chapter_data)} capítulos)")
+            
+        elif choice == '2':
+            # Specific chapter
+            try:
+                target_chapter = input("Digite o número do capítulo: ").strip()
+                target_float = self._safe_parse_chapter_number(target_chapter)
+                
+                # Filter chapters by matching chapter number
+                filtered_chapter_data = self._filter_chapters_by_number(all_chapter_data, target_float, target_float)
+                print(f"Opção selecionada: Capítulo específico {target_chapter} ({len(filtered_chapter_data)} capítulos encontrados)")
+                
+            except ValueError:
+                print("Número de capítulo inválido. Usando download completo.")
+                filtered_chapter_data = all_chapter_data
+                
+        elif choice == '3':
+            # Range download
+            try:
+                start_chapter = input("Digite o capítulo inicial: ").strip()
+                end_chapter = input("Digite o capítulo final: ").strip()
+                
+                start_float = self._safe_parse_chapter_number(start_chapter)
+                end_float = self._safe_parse_chapter_number(end_chapter)
+                
+                if start_float > end_float:
+                    print("Capítulo inicial maior que o final. Invertendo...")
+                    start_float, end_float = end_float, start_float
+                
+                # Filter chapters within range
+                filtered_chapter_data = self._filter_chapters_by_number(all_chapter_data, start_float, end_float)
+                print(f"Opção selecionada: Intervalo {start_chapter} a {end_chapter} ({len(filtered_chapter_data)} capítulos encontrados)")
+                
+            except ValueError:
+                print("Número de capítulo inválido. Usando download completo.")
+                filtered_chapter_data = all_chapter_data
+        
+        if not filtered_chapter_data:
+            print("Nenhum capítulo encontrado com os critérios selecionados.")
+            return
+        
+        # Extract chapter IDs from filtered data
+        chapter_queue = [chapter['id'] for chapter in filtered_chapter_data]
+        print(f"Fila atualizada: {len(chapter_queue)} capítulos selecionados para download.")
         
         # Get manga title for folder structure
         manga_title = self.get_manga_title(chapter_queue[0])
@@ -495,6 +724,7 @@ class MangaDownloader:
         completed_groups = set()
         successful_downloads = 0
         failed_downloads = 0
+        failed_chapters_summary = []  # Track completely failed chapters
         
         for i, chapter_id in enumerate(chapter_queue):
             print(f"\n=== Processing Chapter {i+1}/{len(chapter_queue)}: {chapter_id} ===")
@@ -504,12 +734,60 @@ class MangaDownloader:
                 chapter_dir = self.create_chapter_folder_structure_enhanced(chapter_id, manga_base_dir)
                 print(f"Chapter directory: {chapter_dir}")
                 
-                # Download with verification and high-quality assets
-                success = self.image_downloader.download_chapter_with_verification(chapter_id, chapter_dir)
+                # Get chapter number for fallback logic
+                chapter_number = self._get_chapter_number_from_id(chapter_id)
                 
-                if success:
+                # Download with retry and fallback mechanism
+                download_success = False
+                
+                # Attempt 1: Try original chapter
+                try:
+                    success = self.image_downloader.download_chapter_with_verification(chapter_id, chapter_dir)
+                    if success:
+                        download_success = True
+                        print(f"✓ Successfully downloaded chapter {i+1}")
+                    else:
+                        raise Exception("Download verification failed")
+                except Exception as e:
+                    print(f"⚠️ First attempt failed for chapter {chapter_number}: {e}")
+                    
+                    # Retry: Wait 10 seconds and try again
+                    print("Waiting 10 seconds before retry...")
+                    time.sleep(10)
+                    
+                    try:
+                        success = self.image_downloader.download_chapter_with_verification(chapter_id, chapter_dir)
+                        if success:
+                            download_success = True
+                            print(f"✓ Successfully downloaded chapter {i+1} (retry)")
+                        else:
+                            raise Exception("Download verification failed on retry")
+                    except Exception as retry_e:
+                        print(f"⚠️ Retry failed for chapter {chapter_number}: {retry_e}")
+                        
+                        # Fallback Trigger: Try English version
+                        print(f"Falha definitiva no capítulo {chapter_number} (pt-br). Buscando fallback em inglês...")
+                        
+                        fallback_chapter = self.api_client.get_single_chapter_by_number(manga_id, chapter_number, "en")
+                        
+                        if fallback_chapter:
+                            fallback_id = fallback_chapter['id']
+                            print(f"Found English fallback: {fallback_id}")
+                            
+                            try:
+                                success = self.image_downloader.download_chapter_with_verification(fallback_id, chapter_dir)
+                                if success:
+                                    download_success = True
+                                    print(f"✓ Successfully downloaded English fallback for chapter {i+1}")
+                                else:
+                                    raise Exception("English fallback verification failed")
+                            except Exception as fallback_e:
+                                print(f"⚠️ English fallback also failed: {fallback_e}")
+                        else:
+                            print(f"⚠️ No English fallback found for chapter {chapter_number}")
+                
+                if download_success:
                     successful_downloads += 1
-                    print(f"✓ Successfully downloaded chapter {i+1}")
                     
                     # Check if the volume/group is now complete and export it
                     group_folder = chapter_dir.parent  # This is the Volume_X or Chapters_XXX-YYY folder
@@ -558,7 +836,9 @@ class MangaDownloader:
                             print(f"✗ Failed to process {group_name}: {e}")
                 else:
                     failed_downloads += 1
-                    print(f"✗ Failed to download chapter {i+1}")
+                    print(f"✗ Failed to download chapter {i+1} (all attempts failed)")
+                    # Track completely failed chapter
+                    failed_chapters_summary.append(f"Capítulo {chapter_number} (ID: {chapter_id})")
                 
                 # Be polite to the API
                 if i < len(chapter_queue) - 1:  # Don't sleep after the last chapter
@@ -605,6 +885,15 @@ class MangaDownloader:
         
         print(f"\n=== Complete Workflow Finished ===")
         print(f"Downloaded, enhanced, and exported manga to CBZ and PDF formats")
+        
+        # Final execution summary
+        logging.info("=== Resumo da Execução ===")
+        if not failed_chapters_summary:
+            logging.info("✓ Sucesso absoluto! Todos os capítulos foram baixados e processados sem erros críticos.")
+        else:
+            logging.warning("⚠ Atenção! Os seguintes capítulos falharam completamente e não puderam ser baixados:")
+            for failed_chapter in failed_chapters_summary:
+                logging.warning(f"  - {failed_chapter}")
     
     def _get_volume_for_chapter(self, chapter_id: str) -> str:
         """Helper method to determine which volume a chapter belongs to."""

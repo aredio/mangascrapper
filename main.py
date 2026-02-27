@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import logging
+import gc
 from pathlib import Path
 from tqdm import tqdm
 from md_client import MangaDexDownloader
@@ -164,6 +165,15 @@ def handle_finished_volume(manga_name, volume_name, raw_folder_path, config):
                 print(f"✓ Removed upscaled folder: {upscaled_folder_path}")
         
         print(f"✓ Processing completed for {volume_name}")
+        
+        # Force garbage collection to release unused memory back to OS
+        # Clear any temporary variables storing large lists
+        working_folder = None
+        upscaled_folder_path = None
+        
+        # Collect garbage to prevent RAM bloat during long sessions
+        collected = gc.collect()
+        logger.info(f"Garbage collection completed: {collected} objects reclaimed")
         
     except Exception as e:
         logger.error(f"✗ Error processing {volume_name}: {e}")

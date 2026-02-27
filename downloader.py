@@ -65,49 +65,49 @@ class HighResDownloader:
         content_length = response.headers.get('content-length')
         total_size = int(content_length) if content_length else None
         
-        # Download with streaming
-        response = self.session.get(url, stream=True)
-        response.raise_for_status()
-        
-        # Setup progress bar
-        progress_desc = path.name
-        if total_size:
-            progress_bar = tqdm(
-                total=total_size,
-                unit='B',
-                unit_scale=True,
-                unit_divisor=1024,
-                desc=progress_desc
-            )
-        else:
-            progress_bar = tqdm(
-                unit='B',
-                unit_scale=True,
-                unit_divisor=1024,
-                desc=progress_desc
-            )
-        
-        try:
-            with open(path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        progress_bar.update(len(chunk))
+        # Download with streaming using context manager for proper resource management
+        with self.session.get(url, stream=True) as response:
+            response.raise_for_status()
             
-            progress_bar.close()
-            
-            # Verify file was created and has content
-            if path.exists() and path.stat().st_size > 0:
-                return True
+            # Setup progress bar
+            progress_desc = path.name
+            if total_size:
+                progress_bar = tqdm(
+                    total=total_size,
+                    unit='B',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc=progress_desc
+                )
             else:
-                raise IOError(f"File was not created properly: {path}")
+                progress_bar = tqdm(
+                    unit='B',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc=progress_desc
+                )
+            
+            try:
+                with open(path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            progress_bar.update(len(chunk))
                 
-        except Exception as e:
-            progress_bar.close()
-            # Clean up partial file on failure
-            if path.exists():
-                path.unlink()
-            raise e
+                progress_bar.close()
+                
+                # Verify file was created and has content
+                if path.exists() and path.stat().st_size > 0:
+                    return True
+                else:
+                    raise IOError(f"File was not created properly: {path}")
+                    
+            except Exception as e:
+                progress_bar.close()
+                # Clean up partial file on failure
+                if path.exists():
+                    path.unlink()
+                raise e
     
     def download_multiple_images(self, urls: list, base_dir: Path) -> dict:
         """

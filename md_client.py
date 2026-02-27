@@ -132,16 +132,17 @@ class MangaDexDownloader:
         """
         for attempt in range(max_retries):
             try:
-                response = self.session.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                
-                # Create parent directories if they don't exist
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                with open(save_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
+                # Use context manager for proper resource management
+                with self.session.get(url, stream=True, timeout=30) as response:
+                    response.raise_for_status()
+                    
+                    # Create parent directories if they don't exist
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    with open(save_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
                 
                 return True
                 

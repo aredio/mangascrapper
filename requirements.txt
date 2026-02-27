@@ -5,6 +5,7 @@ Pillow>=9.0.0
 natsort
 numpy>=1.21.0
 tenacity>=8.0.0
+img2pdf>=0.4.4
 # Enhancement dependencies (temporarily disabled due to compatibility issues)
 # torch==2.0.1
 # torchvision==0.15.2

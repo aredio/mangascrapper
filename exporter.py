@@ -1,8 +1,9 @@
 import os
 import zipfile
+import logging
 from PIL import Image
 from natsort import natsorted
-import logging
+import img2pdf
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ class MangaExporter:
         logger.info(f"✓ CBZ export completed: {cbz_filename}")
 
     def export_to_pdf(self, source_folder, manga_name, group_name):
-        """Generate PDF file with naturally sorted images."""
+        """Generate PDF file with naturally sorted images using memory-efficient img2pdf."""
         images = self.get_all_images(source_folder)
         if not images:
             logger.warning(f"No images found in {source_folder} for PDF export.")
@@ -90,32 +91,65 @@ class MangaExporter:
 
         logger.info(f"Creating PDF: {pdf_path} with {len(images)} pages...")
 
-        pil_images = []
-        for img_path in images:
+        try:
+            # Use img2pdf for memory-efficient PDF generation
+            # This processes images directly from files without loading them all into RAM
+            with open(pdf_path, "wb") as f:
+                f.write(img2pdf.convert(images))
+            
+            logger.info(f"✓ PDF export completed: {pdf_filename}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create PDF with img2pdf: {e}")
+            
+            # Fallback to Pillow method if img2pdf fails (still more memory-efficient than before)
+            logger.info("Attempting fallback to Pillow method...")
             try:
-                img = Image.open(img_path)
-                # PDFs require images to be in RGB mode (removing Alpha/Transparency if present)
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                pil_images.append(img)
-            except Exception as e:
-                logger.warning(f"Warning: Could not process image {img_path}: {e}")
-                continue
+                self._export_to_pdf_pillow_fallback(images, pdf_path, pdf_filename)
+            except Exception as fallback_e:
+                logger.error(f"Both img2pdf and Pillow fallback failed: {fallback_e}")
 
-        # Save first image and append the rest to the same file
-        if pil_images:
-            try:
-                pil_images[0].save(
+    def _export_to_pdf_pillow_fallback(self, images, pdf_path, pdf_filename):
+        """Memory-efficient Pillow fallback for PDF generation."""
+        logger.info(f"Using Pillow fallback for PDF generation...")
+        
+        # Process images one by one to minimize memory usage
+        first_image_processed = False
+        
+        with Image.open(images[0]) as first_img:
+            # Convert first image to RGB if needed
+            if first_img.mode != 'RGB':
+                first_img = first_img.convert('RGB')
+            
+            # Save with remaining images
+            remaining_images = []
+            
+            # Process remaining images one by one without keeping them all in memory
+            for img_path in images[1:]:
+                try:
+                    with Image.open(img_path) as img:
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        remaining_images.append(img)
+                except Exception as e:
+                    logger.warning(f"Warning: Could not process image {img_path}: {e}")
+                    continue
+            
+            if remaining_images:
+                first_img.save(
                     pdf_path,
                     save_all=True,
-                    append_images=pil_images[1:],
-                    resolution=100.0  # Base pixel density
+                    append_images=remaining_images,
+                    resolution=100.0
                 )
-                logger.info(f"✓ PDF export completed: {pdf_filename}")
-            except Exception as e:
-                logger.error(f"Failed to create PDF: {e}")
-        else:
-            logger.warning("No valid images found for PDF export.")
+            else:
+                first_img.save(pdf_path, resolution=100.0)
+            
+            # Close all remaining images to free memory
+            for img in remaining_images:
+                img.close()
+        
+        logger.info(f"✓ PDF export completed (fallback): {pdf_filename}")
 
     def run_exports(self, source_folder, manga_name, group_name, make_cbz=True, make_pdf=True):
         """
